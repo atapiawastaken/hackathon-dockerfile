@@ -6,9 +6,14 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 if (!OPENAI_API_KEY) {
     throw new Error('Missing OpenAI API key in environment variables');
+}
+
+if (!GITHUB_TOKEN) {
+    throw new Error('Missing GitHub token in environment variables');
 }
 
 const openai = new OpenAI({
@@ -46,8 +51,16 @@ async function fetchRepoDetails(repoUrl: string): Promise<RepoDetails> {
         const readmeUrl = `https://raw.githubusercontent.com/${repoPath}/main/README.md`;
 
         const [repoResponse, readmeResponse] = await Promise.all([
-            axios.get(apiUrl),
-            axios.get(readmeUrl)
+            axios.get(apiUrl, {
+                headers: {
+                    Authorization: `token ${GITHUB_TOKEN}`
+                }
+            }),
+            axios.get(readmeUrl, {
+                headers: {
+                    Authorization: `token ${GITHUB_TOKEN}`
+                }
+            })
         ]);
 
         const repoData = repoResponse.data;
@@ -62,6 +75,7 @@ async function fetchRepoDetails(repoUrl: string): Promise<RepoDetails> {
 
         return repoDetails;
     } catch (error) {
+        console.error('Error fetching repository details:', (error as any).message);
         throw new Error('Failed to fetch repository details');
     }
 }
@@ -71,17 +85,24 @@ async function listRepoFiles(repoUrl: string): Promise<{name: string, content: s
         const repoPath = repoUrl.replace('https://github.com/', '');
         const apiUrl = `https://api.github.com/repos/${repoPath}/contents`;
 
-        const response = await axios.get(apiUrl);
+        const response = await axios.get(apiUrl, {
+            headers: {
+                Authorization: `token ${GITHUB_TOKEN}`
+            }
+        });
         const files: RepoFile[] = response.data;
 
         const fileContents = await Promise.all(files.map(async file => {
             if (file.type === 'file') {
-                const fileContentResponse = await axios.get(file.git_url);
-                const fileContentData = fileContentResponse.data;
-                const fileContent = Buffer.from(fileContentData.content, 'base64').toString('utf-8');
+                const fileContentResponse = await axios.get(file.download_url, {
+                    headers: {
+                        Authorization: `token ${GITHUB_TOKEN}`
+                    }
+                });
+                const fileContent = fileContentResponse.data;
                 return {
                     name: file.name,
-                    content: fileContent
+                    content: typeof fileContent === 'string' ? fileContent : JSON.stringify(fileContent)
                 };
             }
             return null;
@@ -89,6 +110,7 @@ async function listRepoFiles(repoUrl: string): Promise<{name: string, content: s
 
         return fileContents.filter(file => file !== null) as {name: string, content: string}[];
     } catch (error) {
+        console.error('Error listing repository files:', (error as any).message);
         throw new Error('Failed to list repository files');
     }
 }
@@ -103,16 +125,28 @@ async function generateDockerfile(repoDetails: RepoDetails, files: {name: string
     Provide a complete and commented Dockerfile.`;
 
     try {
-        const response = await openai.completions.create({
-            model: 'text-davinci-003',
-            prompt: prompt,
-            max_tokens: 150,
-            temperature: 0.7,
+        const response = await openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+                { role: 'system', content: 'You are a helpful assistant.' },
+                { role: 'user', content: prompt }
+            ],
         });
 
-        const dockerfile = response.choices[0].text.trim();
-        return dockerfile;
+        if (response.choices && response.choices.length > 0 && response.choices[0].message) {
+            const dockerfile = response.choices[0].message.content?.trim();
+            if (dockerfile) {
+                return dockerfile;
+            } else {
+                console.error('OpenAI API returned an empty message content.');
+                throw new Error('OpenAI API returned an empty message content.');
+            }
+        } else {
+            console.error('OpenAI API returned an empty response.');
+            throw new Error('OpenAI API returned an empty response.');
+        }
     } catch (error) {
+        console.error('Error generating Dockerfile:', (error as any).message);
         throw new Error('Failed to generate Dockerfile');
     }
 }
@@ -121,6 +155,7 @@ async function writeDockerfile(dockerfile: string, filePath: string): Promise<vo
     return new Promise((resolve, reject) => {
         fs.writeFile(filePath, dockerfile, (err) => {
             if (err) {
+                console.error('Error writing Dockerfile to disk:', err.message);
                 reject(err);
             } else {
                 resolve();
@@ -139,7 +174,7 @@ async function main() {
         await writeDockerfile(dockerfile, './Dockerfile');
         console.log('Dockerfile has been written to disk.');
     } catch (error: any) {
-        console.error(error.message);
+        console.error('An error occurred:', error.message);
     }
 }
 
